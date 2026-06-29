@@ -2,8 +2,8 @@ import os
 import re
 import datetime
 import requests
-from bs4 import BeautifulSoup
 from google import genai
+from google.genai import types
 
 # Secure environment extraction from GitHub Secrets
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -24,58 +24,34 @@ def calculate_all_in(current_bid):
     shipping_usd = EST_SHIPPING_SGD / USD_TO_SGD
     return round(bp_cost + shipping_usd, 2)
 
-def fetch_ebay_sold_comps(card_title):
-    """Scrapes raw completed HTML sales elements from eBay based on card title parameters."""
-    search_url = f"https://www.ebay.com/sch/i.html?_nkw={requests.utils.quote(card_title)}&LH_Sold=1&LH_Complete=1"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    }
-    try:
-        response = requests.get(search_url, headers=headers, timeout=10)
-        if response.status_code != 200:
-            return ""
-        soup = BeautifulSoup(response.text, 'html.parser')
-        listings = soup.find_all('li', class_='s-item')
-        
-        comp_data = []
-        for item in listings[:8]:
-            title_elem = item.find('div', class_='s-item__title')
-            price_elem = item.find('span', class_='s-item__price')
-            if title_elem and price_elem:
-                if "shop on ebay" in title_elem.text.lower():
-                    continue
-                comp_data.append(f"Title: {title_elem.text} | Price: {price_elem.text}")
-        return "\n".join(comp_data)
-    except Exception as e:
-        print(f"Scraper error: {e}")
-        return ""
-
-def analyze_market_value_with_gemini(card_title, raw_comps):
-    """Uses Gemini flash engine to evaluate actual median market prices from raw strings."""
-    if not raw_comps:
-        return None
-        
+def analyze_market_value_with_grounding(card_title):
+    """Uses Gemini with live Google Search grounding to find active market prices."""
     prompt = f"""
-    You are an expert sports card appraiser. I am analyzing a card listed on Goldin: "{card_title}".
-    Below is raw text data of recently sold matching items on eBay:
-    ---
-    {raw_comps}
-    ---
-    Analyze these sales. Filter out irrelevant variations or different grades. 
-    Calculate a fair, realistic market value average in USD for the exact card item specified in the Goldin title.
+    Search for recent completed/sold prices on eBay or major auction houses for this exact sports card: "{card_title}".
+    Filter out completely irrelevant variations, reprints, or vastly different grading tiers.
+    Calculate a fair, realistic average market value in USD for this item.
     Respond with ONLY a raw numeric value (e.g., 245.50). Do not include any dollar signs, letters, or explanation.
     """
     
     try:
-        # Fixed alignment structure
+        # Enable live web search tools directly inside the call
+        config = types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())]
+        )
+        
         response = ai_client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=prompt
+            contents=prompt,
+            config=config
         )
+        
+        # Clean text to extract just the number
         clean_num = re.sub(r'[^\d.]', '', response.text.strip())
-        return float(clean_num) if clean_num else None
+        if clean_num:
+            return float(clean_num)
+        return None
     except Exception as e:
-        print(f"Gemini API calculation failure: {e}")
+        print(f"Gemini Grounding API calculation failure: {e}")
         return None
 
 def send_telegram_alert(message):
@@ -87,7 +63,6 @@ def run_valuation_pipeline():
     """
     Processes upcoming targets against live web transaction baselines.
     """
-    # Sample layout showcasing an active simulated item closing within the wide 4-day window
     active_goldin_lots = [
         {
             "title": "2018 Shohei Ohtani Bowman Chrome Rookie Card #1 BGS 9.5",
@@ -97,30 +72,29 @@ def run_valuation_pipeline():
         }
     ]
     
-    now = datetime.datetime.utcnow()
-    
     for lot in active_goldin_lots:
-        time_to_end = lot["end_time"] - now
-        hours_remaining = time_to_end.total_seconds() / 3600
+        all_in_cost = calculate_all_in(lot["current_price"])
         
-        # Confirms target lot closes inside our temporary wider test window (4 days)
-        if 0 <= hours_remaining <= 96:
-            all_in_cost = calculate_all_in(lot["current_price"])
-            raw_html_comps = fetch_ebay_sold_comps(lot["title"])
-            estimated_market_value = analyze_market_value_with_gemini(lot["title"], raw_html_comps)
+        # Fetch valuation using live search grounding
+        estimated_market_value = analyze_market_value_with_grounding(lot["title"])
+        
+        # Guard clause: ensure a valid valuation numerical baseline was returned
+        if estimated_market_value is not None:
+            margin = estimated_market_value - all_in_cost
             
-            # Message fires ONLY if Gemini proves current pricing is lower than historical comps
-            if True: # FORCE TEST DISPATCH
-                margin = estimated_market_value - all_in_cost
+            # Keep 'if True:' active temporarily so you can view the final layout in Telegram
+            if True: 
                 alert_msg = (
                     f"🚨 *BASEBALL VALUE LOT DETECTED (ENDS WITHIN 4 DAYS)*\n\n"
                     f"⚾ *Card:* [{lot['title']}]({lot['url']})\n"
                     f"💰 *Current Bid:* ${lot['current_price']:.2f} USD\n"
                     f"🚢 *All-In Cost (Bid + 22% BP + SG Ship):* ${all_in_cost:.2f} USD\n"
-                    f"📈 *True eBay Market Value:* ${estimated_market_value:.2f} USD\n\n"
-                    f"🔥 *Net Margin:* Profit room of *${margin:.2f} USD* below market value!"
+                    f"📈 *True Live Market Value:* ${estimated_market_value:.2f} USD\n\n"
+                    f"🔥 *Net Margin:* Profit room of *${margin:.2f} USD* relative to market value!"
                 )
                 send_telegram_alert(alert_msg)
+        else:
+            print(f"Skipping evaluation for '{lot['title']}' because valuation failed.")
 
 if __name__ == "__main__":
     run_valuation_pipeline()
