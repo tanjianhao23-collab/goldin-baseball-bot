@@ -5,7 +5,7 @@ import requests
 from bs4 import BeautifulSoup
 from google import genai
 
-# Secure environment extraction
+# Secure environment extraction from GitHub Secrets
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
@@ -15,6 +15,7 @@ BUYERS_PREMIUM = 0.22
 EST_SHIPPING_SGD = 25.00
 USD_TO_SGD = 1.35
 
+# Initialize Gemini Client
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 def calculate_all_in(current_bid):
@@ -50,9 +51,10 @@ def fetch_ebay_sold_comps(card_title):
         return ""
 
 def analyze_market_value_with_gemini(card_title, raw_comps):
-    """Uses Gemini flash context engine to evaluate actual median market prices from raw strings."""
+    """Uses Gemini flash engine to evaluate actual median market prices from raw strings."""
     if not raw_comps:
         return None
+        
     prompt = f"""
     You are an expert sports card appraiser. I am analyzing a card listed on Goldin: "{card_title}".
     Below is raw text data of recently sold matching items on eBay:
@@ -63,5 +65,62 @@ def analyze_market_value_with_gemini(card_title, raw_comps):
     Calculate a fair, realistic market value average in USD for the exact card item specified in the Goldin title.
     Respond with ONLY a raw numeric value (e.g., 245.50). Do not include any dollar signs, letters, or explanation.
     """
+    
     try:
-        response = ai_client.models.generate
+        # Fixed alignment structure
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        clean_num = re.sub(r'[^\d.]', '', response.text.strip())
+        return float(clean_num) if clean_num else None
+    except Exception as e:
+        print(f"Gemini API calculation failure: {e}")
+        return None
+
+def send_telegram_alert(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    requests.post(url, json=payload)
+
+def run_valuation_pipeline():
+    """
+    Processes upcoming targets against live web transaction baselines.
+    """
+    # Sample layout showcasing an active simulated item closing within the wide 4-day window
+    active_goldin_lots = [
+        {
+            "title": "2018 Shohei Ohtani Bowman Chrome Rookie Card #1 BGS 9.5",
+            "current_price": 180.00,
+            "url": "https://goldin.co/auctions/sample-ohtani-bgs",
+            "end_time": datetime.datetime.utcnow() + datetime.timedelta(days=2)
+        }
+    ]
+    
+    now = datetime.datetime.utcnow()
+    
+    for lot in active_goldin_lots:
+        time_to_end = lot["end_time"] - now
+        hours_remaining = time_to_end.total_seconds() / 3600
+        
+        # Confirms target lot closes inside our temporary wider test window (4 days)
+        if 0 <= hours_remaining <= 96:
+            all_in_cost = calculate_all_in(lot["current_price"])
+            raw_html_comps = fetch_ebay_sold_comps(lot["title"])
+            estimated_market_value = analyze_market_value_with_gemini(lot["title"], raw_html_comps)
+            
+            # Message fires ONLY if Gemini proves current pricing is lower than historical comps
+            if estimated_market_value and all_in_cost < estimated_market_value:
+                margin = estimated_market_value - all_in_cost
+                alert_msg = (
+                    f"🚨 *BASEBALL VALUE LOT DETECTED (ENDS WITHIN 4 DAYS)*\n\n"
+                    f"⚾ *Card:* [{lot['title']}]({lot['url']})\n"
+                    f"💰 *Current Bid:* ${lot['current_price']:.2f} USD\n"
+                    f"🚢 *All-In Cost (Bid + 22% BP + SG Ship):* ${all_in_cost:.2f} USD\n"
+                    f"📈 *True eBay Market Value:* ${estimated_market_value:.2f} USD\n\n"
+                    f"🔥 *Net Margin:* Profit room of *${margin:.2f} USD* below market value!"
+                )
+                send_telegram_alert(alert_msg)
+
+if __name__ == "__main__":
+    run_valuation_pipeline()
