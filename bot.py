@@ -10,7 +10,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Singapore All-In Costs Formula Multipliers
+# Singapore Financial Calculations & Freight Formula Multipliers
 BUYERS_PREMIUM = 0.22
 EST_SHIPPING_SGD = 25.00
 USD_TO_SGD = 1.35
@@ -24,6 +24,53 @@ def calculate_all_in(current_bid):
     shipping_usd = EST_SHIPPING_SGD / USD_TO_SGD
     return round(bp_cost + shipping_usd, 2)
 
+def discover_live_goldin_lots():
+    """
+    Uses Gemini Grounding to browse Goldin.co and discover live, active baseball card
+    auctions closing over the next 4 days. Returns a structured list of real targets.
+    """
+    print("Searching live Goldin.co marketplace for active baseball auctions...")
+    
+    prompt = """
+    Browse the live sports card auctions currently running on Goldin.co (specifically baseball cards).
+    Find 3 to 5 active, high-profile sports card lots that are currently open for bidding and closing within the next 4 days.
+    For each lot, I need you to extract:
+    1. The exact title of the item (including manufacturer, player name, and grading details like PSA 10 or BGS 9.5).
+    2. The current live bid price in USD (as a pure number).
+    3. The exact URL link to that live auction item page on Goldin.co.
+    
+    Format your response as a strict Python list of dictionaries, like this:
+    [
+        {"title": "Card Name Here", "current_price": 150.00, "url": "https://goldin.co/item/..."},
+    ]
+    Respond ONLY with the raw python code block. Do not include any conversational markdown text.
+    """
+    
+    try:
+        config = types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())]
+        )
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=config
+        )
+        
+        # Clean the text response to safely isolate and evaluate the array data
+        clean_text = response.text.replace("```python", "").replace("```", "").strip()
+        # Fallback empty list check if parsing fails
+        if not clean_text.startswith("["):
+            match = re.search(r'\[.*\]', clean_text, re.DOTALL)
+            if match:
+                clean_text = match.group(0)
+                
+        live_lots = eval(clean_text)
+        print(f"Successfully discovered {len(live_lots)} live items on Goldin.")
+        return live_lots
+    except Exception as e:
+        print(f"Failed to dynamically discover live Goldin lots: {e}")
+        return []
+
 def analyze_market_value_with_grounding(card_title):
     """Uses Gemini with live Google Search grounding to find real active market prices."""
     prompt = f"""
@@ -34,22 +81,16 @@ def analyze_market_value_with_grounding(card_title):
     """
     
     try:
-        # Enable live web search tools directly inside the model call
         config = types.GenerateContentConfig(
             tools=[types.Tool(google_search=types.GoogleSearch())]
         )
-        
         response = ai_client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
             config=config
         )
-        
-        # Clean text response to isolate just the numerical valuation
         clean_num = re.sub(r'[^\d.]', '', response.text.strip())
-        if clean_num:
-            return float(clean_num)
-        return None
+        return float(clean_num) if clean_num else None
     except Exception as e:
         print(f"Gemini Grounding API calculation failure for {card_title}: {e}")
         return None
@@ -58,84 +99,48 @@ def send_telegram_alert(message):
     """Dispatches formatted markdown notices to your designated Telegram chat handle."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    try:
-        response = requests.post(url, json=payload, timeout=10)
-        print(f"Telegram dispatch status: {response.status_code}")
-    except Exception as e:
-        print(f"Failed to reach Telegram network gateway: {e}")
+    requests.post(url, json=payload, timeout=10)
 
 def run_valuation_pipeline():
     """
-    Processes active tracking targets against live web transaction baselines.
-    Testing mode: Setup with a 4-day structural filter net.
+    Core engine cycle executing live discovery, conversion mapping, and valuation matching.
     """
-    print(f"--- Starting Goldin Baseball Bot Analysis Run [{datetime.datetime.utcnow()}] ---")
+    print(f"--- Starting Live Production Goldin Run [{datetime.datetime.utcnow()}] ---")
     
-    # Test block populated with diverse cards to monitor how Gemini cross-references values
-    active_goldin_lots = [
-        {
-            "title": "2025 Bowman Chrome Sapphire Selections Orange Refractor #SSA-RS Roki Sasaki Signed Rookie Card (#05/25) - BGS GEM MINT 9.5, Beckett 10 - True Gem+",
-            "current_price": 190.00,
-            "url": "https://goldin.co/item/2025-bowman-chrome-sapphire-selections-orange-refractor-ssa-rs-roki-sa3ob5q",
-            "end_time": datetime.datetime.utcnow() + datetime.timedelta(days=2)
-        },
-        {
-            "title": "2011 Topps Update Mike Trout Rookie Card #US175 PSA 10",
-            "current_price": 450.00,
-            "url": "https://goldin.co/auctions/sample-trout-psa10",
-            "end_time": datetime.datetime.utcnow() + datetime.timedelta(days=3)
-        },
-        {
-            "title": "2019 Bowman Chrome Elly De La Cruz 1st Bowman Autograph BGS 9",
-            "current_price": 210.00,
-            "url": "https://goldin.co/auctions/sample-elly-auto",
-            "end_time": datetime.datetime.utcnow() + datetime.timedelta(days=1)
-        }
-    ]
-    
-    now = datetime.datetime.utcnow()
+    # Dynamically pull real active lots from Goldin
+    active_goldin_lots = discover_live_goldin_lots()
     
     for lot in active_goldin_lots:
-        time_to_end = lot["end_time"] - now
-        hours_remaining = time_to_end.total_seconds() / 3600
+        print(f"\nAppraising Live Item: '{lot['title']}'")
+        all_in_cost = calculate_all_in(lot["current_price"])
+        print(f"Current Goldin Bid: ${lot['current_price']:.2f} USD | SG All-In Cost: ${all_in_cost:.2f} USD")
         
-        print(f"\nEvaluating target item: '{lot['title']}'")
-        print(f"Time remaining: {hours_remaining:.1f} hours")
+        # Calculate real-world baseline value using live search records
+        estimated_market_value = analyze_market_value_with_grounding(lot["title"])
         
-        # Confirms target lot closes inside your 4-day test window (0 to 96 hours)
-        if 0 <= hours_remaining <= 96:
-            all_in_cost = calculate_all_in(lot["current_price"])
-            print(f"Calculated SG Delivered All-In Cost: ${all_in_cost:.2f} USD")
+        if estimated_market_value is not None:
+            margin = estimated_market_value - all_in_cost
+            print(f"True Live Market Value: ${estimated_market_value:.2f} USD | Profit Spread: ${margin:.2f} USD")
             
-            # Fetch real-world baseline values using live search grounding
-            print("Querying live web sales indexes via Gemini...")
-            estimated_market_value = analyze_market_value_with_grounding(lot["title"])
-            
-            if estimated_market_value is not None:
-                margin = estimated_market_value - all_in_cost
-                print(f"Live Market Baseline: ${estimated_market_value:.2f} USD")
-                print(f"Calculated Value Differential: ${margin:.2f} USD")
-                
-                # Financial Threshold Filter: Only alerts you if it's a proven bargain below market price
-                if all_in_cost < estimated_market_value:
-                    print("🔥 Profitable margin verified! Sending priority dispatch to Telegram...")
-                    alert_msg = (
-                        f"🚨 *BASEBALL VALUE LOT DETECTED (ENDS WITHIN 4 DAYS)*\n\n"
-                        f"⚾ *Card:* [{lot['title']}]({lot['url']})\n"
-                        f"💰 *Current Bid:* ${lot['current_price']:.2f} USD\n"
-                        f"🚢 *All-In Cost (Bid + 22% BP + SG Ship):* ${all_in_cost:.2f} USD\n"
-                        f"📈 *True Live Market Value:* ${estimated_market_value:.2f} USD\n\n"
-                        f"🔥 *Net Margin:* Profit room of *${margin:.2f} USD* relative to market value!"
-                    )
-                    send_telegram_alert(alert_msg)
-                else:
-                    print("❌ Filtered out: All-in delivery cost exceeds market value baseline.")
+            # Change this to 'if True:' if you want to see every live card pulled regardless of price.
+            # Keep it as 'if all_in_cost < estimated_market_value:' to only ping you on genuine deals.
+            if all_in_cost < estimated_market_value:
+                print("🔥 Valid bargain identified! Sending notification to Telegram...")
+                alert_msg = (
+                    f"🚨 *LIVE VALUE AUCTION DETECTED*\n\n"
+                    f"⚾ *Card:* [{lot['title']}]({lot['url']})\n"
+                    f"💰 *Current Live Bid:* ${lot['current_price']:.2f} USD\n"
+                    f"🚢 *All-In Delivered to SG:* ${all_in_cost:.2f} USD\n"
+                    f"📈 *Estimated Market Value:* ${estimated_market_value:.2f} USD\n\n"
+                    f"🔥 *Net Margin:* Profit cushion of *${margin:.2f} USD* below market value!"
+                )
+                send_telegram_alert(alert_msg)
             else:
-                print(f"Skipping appraisal for '{lot['title']}' because web valuation extraction returned None.")
+                print("❌ Skipped: Current all-in price is too close to or above market value.")
         else:
-            print("Skipping item: Outside of configured monitoring window.")
+            print("Skipped: Market valuation extraction returned None.")
             
-    print("\n--- Pipeline Execution Cycle Complete ---")
+    print("\n--- Live Production Cycle Complete ---")
 
 if __name__ == "__main__":
     run_valuation_pipeline()
