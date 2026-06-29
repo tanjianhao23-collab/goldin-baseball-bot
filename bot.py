@@ -44,6 +44,7 @@ def analyze_watchlist_batched(urls):
     """
     Bundles all items into exactly ONE API call to preserve your tokens.
     Uses Google Search grounding via Gemini 3.5 Flash to extract true valuations.
+    Falls back to Gemini 2.5 Flash automatically if Google's servers are overloaded.
     """
     print(f"Bundling {len(urls)} items into a single API batch token request...")
     urls_formatted = "\n".join([f"- {url}" for url in urls])
@@ -65,13 +66,33 @@ def analyze_watchlist_batched(urls):
         tools=[types.Tool(google_search=types.GoogleSearch())]
     )
     
+    # Primary attempt: Cut-edge 3.5 variant
     try:
+        print("🤖 Attempting appraisal with primary engine (Gemini 3.5 Flash)...")
         response = ai_client.models.generate_content(
             model='gemini-3.5-flash',
             contents=prompt,
             config=config
         )
-        
+    except Exception as e:
+        error_msg = str(e)
+        # Catch severe traffic spikes and execute live auto-recovery
+        if "503" in error_msg or "UNAVAILABLE" in error_msg:
+            print("⚠️ Gemini 3.5 is currently overloaded. Activating automatic fallback to stable Gemini 2.5 Flash...")
+            try:
+                response = ai_client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt,
+                    config=config
+                )
+            except Exception as fallback_e:
+                print(f"❌ Fallback execution failed completely: {fallback_e}")
+                return []
+        else:
+            print(f"❌ Gemini API execution failed: {e}")
+            return []
+            
+    try:
         raw_text = response.text.strip()
         match = re.search(r'\[.*\]', raw_text, re.DOTALL)
         if match:
@@ -79,7 +100,7 @@ def analyze_watchlist_batched(urls):
             
         return json.loads(raw_text)
     except Exception as e:
-        print(f"❌ Gemini 3.5 execution failed: {e}")
+        print(f"❌ Failed to parse JSON response payload: {e}")
         return []
 
 def send_telegram_digest(items_report):
