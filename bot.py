@@ -74,9 +74,9 @@ def run_valuation_pipeline():
     # Test block populated with diverse cards to monitor how Gemini cross-references values
     active_goldin_lots = [
         {
-            "title": "2018 Shohei Ohtani Bowman Chrome Rookie Card #1 BGS 9.5",
-            "current_price": 180.00,
-            "url": "https://goldin.co/auctions/sample-ohtani-bgs",
+            "title": "2025 Bowman Chrome Sapphire Selections Orange Refractor #SSA-RS Roki Sasaki Signed Rookie Card (#05/25) - BGS GEM MINT 9.5, Beckett 10 - True Gem+",
+            "current_price": 190.00,
+            "url": "https://goldin.co/item/2025-bowman-chrome-sapphire-selections-orange-refractor-ssa-rs-roki-sa3ob5q",
             "end_time": datetime.datetime.utcnow() + datetime.timedelta(days=2)
         },
         {
