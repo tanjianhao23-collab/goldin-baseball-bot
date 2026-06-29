@@ -87,33 +87,40 @@ def send_telegram_alert(message):
 def run_valuation_pipeline():
     """
     Simulated ingestion matrix matching raw closing item criteria.
-    In your full production version, loop your active Goldin scraper array here.
+    Now expanded to scan for items ending anywhere within the next 4 days.
     """
-    # Sample layout showcasing an active 2-hour closing item target
+    # Sample layout showcasing an active item closing within the new 4-day window
     active_goldin_lots = [
         {
             "title": "2018 Shohei Ohtani Bowman Chrome Rookie Card #1 BGS 9.5",
             "current_price": 180.00,
-            "url": "https://goldin.co/auctions/sample-ohtani-bgs"
+            "url": "https://goldin.co/auctions/sample-ohtani-bgs",
+            "end_time": datetime.datetime.utcnow() + datetime.timedelta(days=2) # Simulated: Ends in 2 days
         }
     ]
     
+    now = datetime.datetime.utcnow()
+    
     for lot in active_goldin_lots:
-        all_in_cost = calculate_all_in(lot["current_price"])
-        raw_html_comps = fetch_ebay_sold_comps(lot["title"])
-        estimated_market_value = analyze_market_value_with_gemini(lot["title"], raw_html_comps)
+        time_to_end = lot["end_time"] - now
+        hours_remaining = time_to_end.total_seconds() / 3600
         
-        if estimated_market_value and all_in_cost < estimated_market_value:
-            margin = estimated_market_value - all_in_cost
-            alert_msg = (
-                f"🚨 *BASEBALL VALUE LOT DETECTED (2HRS LEFT)*\n\n"
-                f"⚾ *Card:* [{lot['title']}]({lot['url']})\n"
-                f"💰 *Current Bid:* ${lot['current_price']:.2f} USD\n"
-                f"🚢 *All-In Cost (Bid + 22% BP + SG Ship):* ${all_in_cost:.2f} USD\n"
-                f"📈 *True eBay Market Value:* ${estimated_market_value:.2f} USD\n\n"
-                f"🔥 *Net Margin:* Profit room of *${margin:.2f} USD* below market value!"
-            )
-            send_telegram_alert(alert_msg)
-
+        # New Filter: Targets items closing between 0 and 96 hours from now (4 days)
+        if 0 <= hours_remaining <= 96:
+            all_in_cost = calculate_all_in(lot["current_price"])
+            raw_html_comps = fetch_ebay_sold_comps(lot["title"])
+            estimated_market_value = analyze_market_value_with_gemini(lot["title"], raw_html_comps)
+            
+            if estimated_market_value and all_in_cost < estimated_market_value:
+                margin = estimated_market_value - all_in_cost
+                alert_msg = (
+                    f"🚨 *BASEBALL VALUE LOT DETECTED (ENDS WITHIN 4 DAYS)*\n\n"
+                    f"⚾ *Card:* [{lot['title']}]({lot['url']})\n"
+                    f"💰 *Current Bid:* ${lot['current_price']:.2f} USD\n"
+                    f"🚢 *All-In Cost (Bid + 22% BP + SG Ship):* ${all_in_cost:.2f} USD\n"
+                    f"📈 *True eBay Market Value:* ${estimated_market_value:.2f} USD\n\n"
+                    f"🔥 *Net Margin:* Profit room of *${margin:.2f} USD* below market value!"
+                )
+                send_telegram_alert(alert_msg)
 if __name__ == "__main__":
     run_valuation_pipeline()
