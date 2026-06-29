@@ -16,14 +16,20 @@ BUYERS_PREMIUM = 0.22
 EST_SHIPPING_SGD = 25.00
 USD_TO_SGD = 1.35
 
-# Initialize Upgraded Gemini Client
+# Initialize Gemini Client
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
+def calculate_current_all_in(current_bid_usd):
+    """Calculates what you would pay right now in SGD if you won at the current bid."""
+    if not current_bid_usd or current_bid_usd <= 0:
+        return 0.0
+    bid_with_bp_usd = current_bid_usd * (1 + BUYERS_PREMIUM)
+    bid_with_bp_sgd = bid_with_bp_usd * USD_TO_SGD
+    total_all_in_sgd = bid_with_bp_sgd + EST_SHIPPING_SGD
+    return round(total_all_in_sgd, 2)
+
 def calculate_max_goldin_bid(market_value_usd):
-    """
-    Reverse-engineers your SG shipping formula to determine the exact 
-    maximum hammer price you can bid on Goldin before losing money.
-    """
+    """Calculates your absolute maximum walk-away hammer price in USD based on historical market value."""
     if not market_value_usd or market_value_usd <= 0:
         return 0.0
     market_value_sgd = market_value_usd * USD_TO_SGD
@@ -42,16 +48,17 @@ def load_watchlist():
 
 def analyze_watchlist_batched(urls):
     """
-    Bundles all items into exactly ONE API call to preserve your tokens.
-    Uses Google Search grounding via Gemini 3.5 Flash to extract true valuations.
-    Falls back to Gemini 2.5 Flash automatically if Google's servers are overloaded.
+    Bundles all items into one single API request. 
+    Uses Google Search Grounding to scrape the live bid AND find historical eBay comps.
     """
     print(f"Bundling {len(urls)} items into a single API batch token request...")
     urls_formatted = "\n".join([f"- {url}" for url in urls])
     
     prompt = f"""
-    You are an elite sports card market analyst. I have a list of live auction links on Goldin.co.
-    For each link, identify the card title from the URL string, and use Google Search grounding to discover its current conservative open market value (based on recent sold historical comps on eBay, 130Point, or major auction houses) in USD.
+    You are an expert sports card investment broker. I am providing a list of live auction URLs on Goldin.co.
+    For each link, use Google Search grounding to perform a two-step analysis:
+    1. Scrape the live Goldin link itself to find the exact "Current Bid" amount in USD and extract a clean card title.
+    2. Search external web data (eBay completed/sold transactions, 130Point sales histories, or comparable auction house records) to establish a realistic, conservative historical "Estimated Market Value" in USD based on actual past sales transactions.
     
     Auctions to evaluate:
     {urls_formatted}
@@ -59,14 +66,15 @@ def analyze_watchlist_batched(urls):
     Return your analysis strictly as a raw JSON array of objects. Do not wrap it in markdown block formatting like ```json or add conversational text outside the array. Each object must contain exactly these keys:
     - "url": The exact original URL provided.
     - "card_title": A clean, professionally formatted title of the card.
-    - "estimated_market_value_usd": A pure decimal number representing the median recent sold price. If no reliable comps exist, return null.
+    - "current_bid_usd": A pure decimal number representing the current live bid on the page. If extraction fails, look for the current minimum bid or estimate based on recent page indexing.
+    - "estimated_market_value_usd": A pure decimal number representing the historical median sold transaction price from eBay/past auctions.
     """
     
     config = types.GenerateContentConfig(
         tools=[types.Tool(google_search=types.GoogleSearch())]
     )
     
-    # Primary attempt: Cut-edge 3.5 variant
+    # Primary attempt: 3.5 Flash
     try:
         print("🤖 Attempting appraisal with primary engine (Gemini 3.5 Flash)...")
         response = ai_client.models.generate_content(
@@ -76,9 +84,8 @@ def analyze_watchlist_batched(urls):
         )
     except Exception as e:
         error_msg = str(e)
-        # Catch severe traffic spikes and execute live auto-recovery
         if "503" in error_msg or "UNAVAILABLE" in error_msg:
-            print("⚠️ Gemini 3.5 is currently overloaded. Activating automatic fallback to stable Gemini 2.5 Flash...")
+            print("⚠️ Gemini 3.5 is busy. Dropping back to stable Gemini 2.5 Flash...")
             try:
                 response = ai_client.models.generate_content(
                     model='gemini-2.5-flash',
@@ -104,33 +111,46 @@ def analyze_watchlist_batched(urls):
         return []
 
 def send_telegram_digest(items_report):
-    """Compiles appraisal data into a clean, scannable investment summary message."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    """Compiles appraisal data into your precise 4-point requirement format."""
+    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendMessage"
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     
     message_lines = [
-        "📋 *LIVE WATCHLIST MARKET APPRAISAL*",
+        "📋 *LIVE WATCHLIST SNIPER BLUEPRINT*",
         f"🕒 _Generated: {timestamp} SGT_\n",
-        "Here is your customized sniper blueprint. The *Max Goldin Bid* calculates your absolute walk-away ceiling to lock in profits after factoring in your Singapore import shipping fees and buyers premium:\n"
+        "Target Analysis Breakdowns:\n"
     ]
     
     for item in items_report:
         title = item.get("card_title", "Unknown Sports Card Target")
         link = item.get("url", "#")
-        mv = item.get("estimated_market_value_usd")
+        current_bid = item.get("current_bid_usd")
+        market_value = item.get("estimated_market_value_usd")
         
-        if mv:
-            max_bid = calculate_max_goldin_bid(mv)
-            message_lines.append(f"⚾ *{title}*")
-            message_lines.append(f"📈 *Est. Market Value:* ${mv:,.2f} USD")
-            message_lines.append(f"🛑 *Your Max Goldin Bid:* `${max_bid:,.2f} USD`")
-            message_lines.append(f"🔗 [View Auction]({link})")
-            message_lines.append("-" * 28)
+        message_lines.append(f"⚾ *{title}*")
+        
+        # 1. Current Bid Price
+        if current_bid:
+            message_lines.append(f"🔹 *Current Bid Price:* ${current_bid:,.2f} USD")
+            # 2. Current Bid Price + Buyer's Premium + Shipping
+            all_in_sgd = calculate_current_all_in(current_bid)
+            message_lines.append(f"🔹 *Current Cost All-In:* ${all_in_sgd:,.2f} SGD _(w/ 22% BP + $25 SG Shipping)_")
         else:
-            message_lines.append(f"⚠️ *{title}*")
-            message_lines.append(f"ℹ️ _No definitive open-market historical pricing located via search context._")
-            message_lines.append(f"🔗 [View Auction]({link})")
-            message_lines.append("-" * 28)
+            message_lines.append("🔹 *Current Bid Price:* _Could not extract live auction data._")
+            message_lines.append("🔹 *Current Cost All-In:* N/A")
+            
+        # 3. Estimated Market Price (Historical Transactions)
+        if market_value:
+            message_lines.append(f"🔹 *Est. Market Price (Past Sales):* ${market_value:,.2f} USD")
+            # 4. Max Goldin Bid Price (Considering BP + Shipping)
+            max_bid = calculate_max_goldin_bid(market_value)
+            message_lines.append(f"🛑 *Your Max Goldin Bid:* `${max_bid:,.2f} USD` _(Walk-away ceiling)_")
+        else:
+            message_lines.append("🔹 *Est. Market Price (Past Sales):* _No clear transaction records found on eBay/130Point._")
+            message_lines.append("🛑 *Your Max Goldin Bid:* N/A")
+            
+        message_lines.append(f"🔗 [View Live Listing on Goldin]({link})")
+        message_lines.append("-" * 28)
             
     payload = {
         "chat_id": CHAT_ID,
