@@ -112,7 +112,7 @@ def analyze_watchlist_batched(urls):
 
 def send_telegram_digest(items_report):
     """Compiles appraisal data into your precise 4-point requirement format."""
-    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     
     message_lines = [
