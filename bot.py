@@ -22,6 +22,8 @@ ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 def calculate_all_in(current_bid):
     """Calculates final price delivered to SG including 22% BP and shipping conversion."""
+    if not current_bid:
+        return 0.0
     bp_cost = current_bid * (1 + BUYERS_PREMIUM)
     shipping_usd = EST_SHIPPING_SGD / USD_TO_SGD
     return round(bp_cost + shipping_usd, 2)
@@ -38,24 +40,36 @@ def load_watchlist():
     print(f"Loaded {len(links)} targeted auctions from watchlist.txt.")
     return links
 
-def appraise_live_url_with_gemini(url):
+def extract_card_title_from_url(url):
     """
-    Instructs Gemini to ground itself directly on your live auction link.
-    JSON formatting is handled via prompt engineering to prevent API tool conflicts.
+    Saves API tokens by reading details directly from the URL link slug.
+    Converts text strings cleanly to title format while stripping tracking hashes.
+    """
+    try:
+        slug = url.split("/item/")[-1]
+        parts = slug.split("-")
+        if len(parts) > 1:
+            # Strip unique tracking hash strings at the tail end of the link
+            parts = parts[:-1]
+        return " ".join(parts).title()
+    except Exception:
+        return "Unknown Sports Card Target"
+
+def appraise_live_bid_with_gemini(url):
+    """
+    Instructs Gemini to ground itself on live auction links to locate the current price.
+    Returns defensive null fallbacks to prevent conversion errors.
     """
     print(f"Inspecting live auction asset parameters: {url}")
     prompt = f"""
     Look closely at this live auction link: "{url}".
-    Extract two specific pieces of information from the current page state:
-    1. The exact descriptive item title of the sports card (including company, player, year, and grading tier like PSA 10 or BGS 9.5).
-    2. The current live bid price in USD as a pure decimal number.
-    
-    Format your response EXACTLY as a raw JSON object with 'title' and 'current_price' keys, like this:
+    Extract the current live bid price in USD as a pure decimal number.
+    Format your response EXACTLY as a raw JSON object with a single 'current_price' key:
     {{
-      "title": "Card Name Here",
       "current_price": 150.00
     }}
-    Do not include any conversational markdown text, explanation, or notes outside the raw JSON block.
+    If you cannot look inside or find the bid element on the page, return null for the value.
+    Do not include any conversational markdown text outside the raw JSON block.
     """
     
     try:
@@ -71,20 +85,22 @@ def appraise_live_url_with_gemini(url):
         # Enforce free-tier pacing delay
         time.sleep(15)
         
-        # Isolate code block content cleanly via regex
         raw_text = response.text.strip()
         match = re.search(r'\{.*\}', raw_text, re.DOTALL)
         if match:
             raw_text = match.group(0)
             
         data = json.loads(raw_text)
-        return data.get("title"), float(data.get("current_price", 0))
+        price_raw = data.get("current_price")
+        
+        # Defensive Type-Checking: Prevent NoneType conversion failure
+        return float(price_raw) if price_raw is not None else 0.0
     except Exception as e:
-        print(f"Failed to read live link details via grounding: {e}")
-        return None, None
+        print(f"⚠️ Live price extraction fallback engaged: {e}")
+        return 0.0
 
 def analyze_market_value_with_grounding(card_title):
-    """Uses Gemini with live Google Search grounding to find historical sold comps on the open web."""
+    """Uses Gemini live Google Search grounding to find historical sold comps on the open web."""
     print(f"Researching market value history for: {card_title}")
     prompt = f"""
     Search for recent completed/sold prices on eBay, 130Point, or major auction houses for this exact sports card: "{card_title}".
@@ -109,14 +125,18 @@ def analyze_market_value_with_grounding(card_title):
         clean_num = re.sub(r'[^\d.]', '', response.text.strip())
         return float(clean_num) if clean_num else None
     except Exception as e:
-        print(f"Gemini Comps API calculation failure for {card_title}: {e}")
+        print(f"⚠️ Gemini Comps API calculation failure for {card_title}: {e}")
         return None
 
 def send_telegram_alert(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
-        requests.post(url, json=payload, timeout=10)
+        res = requests.post(url, json=payload, timeout=10)
+        if res.status_code == 200:
+            print("🚀 Notification successfully pushed to Telegram channel!")
+        else:
+            print(f"⚠️ Telegram returned status code: {res.status_code}")
     except Exception as e:
         print(f"Telegram notification dispatch error: {e}")
 
@@ -126,40 +146,54 @@ def run_valuation_pipeline():
     watchlist_urls = load_watchlist()
     
     for url in watchlist_urls:
-        # Phase 1: Read what the card is currently sitting at
-        title, current_price = appraise_live_url_with_gemini(url)
+        # Step 1: Use native local string parsing for titles to preserve daily quota limit
+        title = extract_card_title_from_url(url)
+        print(f"\nTarget Cataloged: '{title}'")
         
-        if not title or not current_price:
-            print(f"Skipping link due to extraction limits or errors: {url}\n")
-            continue
-            
+        # Step 2: Request real-time asset pricing metrics defensively
+        current_price = appraise_live_bid_with_gemini(url)
         all_in_cost = calculate_all_in(current_price)
-        print(f"Target cataloged: '{title}'")
-        print(f"Current Live Bid: ${current_price:.2f} USD | SG All-In Cost: ${all_in_cost:.2f} USD")
         
-        # Phase 2: Run historical market valuation
+        if current_price > 0:
+            print(f"Current Live Bid: ${current_price:.2f} USD | SG All-In Cost: ${all_in_cost:.2f} USD")
+        else:
+            print("⚠️ Live bid price missing/unindexed. Running valuation checks using pure baseline comps...")
+            
+        # Step 3: Run historical open-market valuation checks
         estimated_market_value = analyze_market_value_with_grounding(title)
         
         if estimated_market_value is not None:
-            margin = estimated_market_value - all_in_cost
-            print(f"True Live Market Value: ${estimated_market_value:.2f} USD | Profit Spread: ${margin:.2f} USD")
+            print(f"True Live Market Value: ${estimated_market_value:.2f} USD")
             
-            # Financial Margin Filter: Alert only if asset clears a profitable threshold
-            if all_in_cost < estimated_market_value:
-                print("🔥 Valid bargain identified! Sending notification to Telegram...")
+            # If current price is missing, alert the market value directly so you can sniper bid manually
+            if current_price == 0.0:
+                print("🔥 Base comp located. Pushing data report to Telegram...")
                 alert_msg = (
-                    f"🎯 *WATCHLIST SNIPER: BARGAIN DETECTED*\n\n"
+                    f"📊 *WATCHLIST REPORT: VALUE APPRAISAL*\n\n"
                     f"⚾ *Card:* [{title}]({url})\n"
-                    f"💰 *Current Live Bid:* ${current_price:.2f} USD\n"
-                    f"🚢 *All-In Delivered to SG:* ${all_in_cost:.2f} USD\n"
-                    f"📈 *Estimated Market Value:* ${estimated_market_value:.2f} USD\n\n"
-                    f"🔥 *Net Margin:* Profit cushion of *${margin:.2f} USD* below market value!"
+                    f"📈 *Estimated Open Market Value:* ${estimated_market_value:.2f} USD\n"
+                    f"ℹ️ _Note: Live price could not be auto-extracted. Check item page link manually to verify target bargain window!_"
                 )
                 send_telegram_alert(alert_msg)
             else:
-                print("❌ Skipped: Price is currently too close to or above market value.")
+                margin = estimated_market_value - all_in_cost
+                print(f"Calculated Profit Spread: ${margin:.2f} USD")
+                
+                if all_in_cost < estimated_market_value:
+                    print("🔥 Valid bargain identified! Sending notification to Telegram...")
+                    alert_msg = (
+                        f"🎯 *WATCHLIST SNIPER: BARGAIN DETECTED*\n\n"
+                        f"⚾ *Card:* [{title}]({url})\n"
+                        f"💰 *Current Live Bid:* ${current_price:.2f} USD\n"
+                        f"🚢 *All-In Delivered to SG:* ${all_in_cost:.2f} USD\n"
+                        f"📈 *Estimated Market Value:* ${estimated_market_value:.2f} USD\n\n"
+                        f"🔥 *Net Margin:* Profit cushion of *NOTE: ${margin:.2f} USD* below market value!"
+                    )
+                    send_telegram_alert(alert_msg)
+                else:
+                    print("❌ Skipped: Price is currently too close to or above market value.")
         else:
-            print("Skipped: Historical validation metrics returned None.")
+            print("Skipped: Historical validation metrics returned None due to rate limit constraints.")
         print("-" * 40)
             
     print("\n--- Sniper Execution Cycle Complete ---")
