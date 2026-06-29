@@ -10,7 +10,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
-# Singapore Financial Calculations & Freight Formula Multipliers
+# Singapore All-In Costs Formula Multipliers
 BUYERS_PREMIUM = 0.22
 EST_SHIPPING_SGD = 25.00
 USD_TO_SGD = 1.35
@@ -24,31 +24,39 @@ def calculate_all_in(current_bid):
     shipping_usd = EST_SHIPPING_SGD / USD_TO_SGD
     return round(bp_cost + shipping_usd, 2)
 
-def discover_live_goldin_lots():
-    """
-    Uses Gemini Grounding to browse Goldin.co and discover live, active baseball card
-    auctions closing over the next 4 days. Returns a structured list of real targets.
-    """
-    print("Searching live Goldin.co marketplace for active baseball auctions...")
+def load_watchlist():
+    """Reads live targets directly from your repository text file."""
+    filename = "watchlist.txt"
+    if not os.path.exists(filename):
+        print(f"⚠️ '{filename}' not found. Please create it in your repo root.")
+        return []
     
-    prompt = """
-    Browse the live sports card auctions currently running on Goldin.co (specifically baseball cards).
-    Find 3 to 5 active, high-profile sports card lots that are currently open for bidding and closing within the next 4 days.
-    For each lot, I need you to extract:
-    1. The exact title of the item (including manufacturer, player name, and grading details like PSA 10 or BGS 9.5).
-    2. The current live bid price in USD (as a pure number).
-    3. The exact URL link to that live auction item page on Goldin.co.
+    with open(filename, "r") as f:
+        # Pull clean links, ignoring blank lines or comments
+        links = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+    print(f"Loaded {len(links)} targeted auctions from watchlist.txt.")
+    return links
+
+def appraise_live_url_with_gemini(url):
+    """
+    Instructs Gemini to ground itself directly on your live auction link, 
+    bypassing browser blocks to pull current pricing metrics.
+    """
+    print(f"Inspecting live auction asset parameters: {url}")
+    prompt = f"""
+    Look closely at this live auction link: "{url}".
+    Extract two specific pieces of information from the current page state:
+    1. The exact descriptive item title of the sports card (including company, player, year, and grading tier like PSA 10 or BGS 9.5).
+    2. The current live bid price in USD as a pure decimal number.
     
-    Format your response as a strict Python list of dictionaries, like this:
-    [
-        {"title": "Card Name Here", "current_price": 150.00, "url": "https://goldin.co/item/..."},
-    ]
-    Respond ONLY with the raw python code block. Do not include any conversational markdown text.
+    Return your answer strictly as a JSON object with 'title' and 'current_price' keys.
+    Do not include any markdown styling elements or introductory text.
     """
     
     try:
         config = types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())]
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            response_mime_type="application/json"
         )
         response = ai_client.models.generate_content(
             model='gemini-2.5-flash',
@@ -56,23 +64,18 @@ def discover_live_goldin_lots():
             config=config
         )
         
-        # Clean the text response to safely isolate and evaluate the array data
-        clean_text = response.text.replace("```python", "").replace("```", "").strip()
-        # Fallback empty list check if parsing fails
-        if not clean_text.startswith("["):
-            match = re.search(r'\[.*\]', clean_text, re.DOTALL)
-            if match:
-                clean_text = match.group(0)
-                
-        live_lots = eval(clean_text)
-        print(f"Successfully discovered {len(live_lots)} live items on Goldin.")
-        return live_lots
+        # Clean out any potential markdown wrapper text
+        raw_text = response.text.strip()
+        clean_json = re.sub(r'^```json\s*|```$', '', raw_text, flags=re.MULTILINE).strip()
+        
+        data = json.loads(clean_json)
+        return data.get("title"), float(data.get("current_price", 0))
     except Exception as e:
-        print(f"Failed to dynamically discover live Goldin lots: {e}")
-        return []
+        print(f"Failed to read live link details via grounding: {e}")
+        return None, None
 
 def analyze_market_value_with_grounding(card_title):
-    """Uses Gemini with live Google Search grounding to find real active market prices."""
+    """Uses Gemini to find historical sold comps on the open web."""
     prompt = f"""
     Search for recent completed/sold prices on eBay, 130Point, or major auction houses for this exact sports card: "{card_title}".
     Filter out completely irrelevant variations, reprints, or vastly different grading tiers.
@@ -92,55 +95,57 @@ def analyze_market_value_with_grounding(card_title):
         clean_num = re.sub(r'[^\d.]', '', response.text.strip())
         return float(clean_num) if clean_num else None
     except Exception as e:
-        print(f"Gemini Grounding API calculation failure for {card_title}: {e}")
+        print(f"Gemini Comps API calculation failure for {card_title}: {e}")
         return None
 
 def send_telegram_alert(message):
-    """Dispatches formatted markdown notices to your designated Telegram chat handle."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
     requests.post(url, json=payload, timeout=10)
 
 def run_valuation_pipeline():
-    """
-    Core engine cycle executing live discovery, conversion mapping, and valuation matching.
-    """
-    print(f"--- Starting Live Production Goldin Run [{datetime.datetime.utcnow()}] ---")
+    print(f"--- Starting Sniper Watchlist Run [{datetime.datetime.utcnow()}] ---")
+    import json # Ensure json is accessible within scope
     
-    # Dynamically pull real active lots from Goldin
-    active_goldin_lots = discover_live_goldin_lots()
+    watchlist_urls = load_watchlist()
     
-    for lot in active_goldin_lots:
-        print(f"\nAppraising Live Item: '{lot['title']}'")
-        all_in_cost = calculate_all_in(lot["current_price"])
-        print(f"Current Goldin Bid: ${lot['current_price']:.2f} USD | SG All-In Cost: ${all_in_cost:.2f} USD")
+    for url in watchlist_urls:
+        # Phase 1: Read what the card is currently at right now
+        title, current_price = appraise_live_url_with_gemini(url)
         
-        # Calculate real-world baseline value using live search records
-        estimated_market_value = analyze_market_value_with_grounding(lot["title"])
+        if not title or not current_price:
+            print(f"Skipping link due to extraction limits: {url}")
+            continue
+            
+        all_in_cost = calculate_all_in(current_price)
+        print(f"Target identified: '{title}'")
+        print(f"Current Live Bid: ${current_price:.2f} USD | SG All-In Cost: ${all_in_cost:.2f} USD")
+        
+        # Phase 2: Run historical market valuation
+        estimated_market_value = analyze_market_value_with_grounding(title)
         
         if estimated_market_value is not None:
             margin = estimated_market_value - all_in_cost
             print(f"True Live Market Value: ${estimated_market_value:.2f} USD | Profit Spread: ${margin:.2f} USD")
             
-            # Change this to 'if True:' if you want to see every live card pulled regardless of price.
-            # Keep it as 'if all_in_cost < estimated_market_value:' to only ping you on genuine deals.
+            # Financial Margin Filter: Pings you ONLY if it's currently a bargain!
             if all_in_cost < estimated_market_value:
                 print("🔥 Valid bargain identified! Sending notification to Telegram...")
                 alert_msg = (
-                    f"🚨 *LIVE VALUE AUCTION DETECTED*\n\n"
-                    f"⚾ *Card:* [{lot['title']}]({lot['url']})\n"
-                    f"💰 *Current Live Bid:* ${lot['current_price']:.2f} USD\n"
+                    f"🎯 *WATCHLIST SNIPER: BARGAIN DETECTED*\n\n"
+                    f"⚾ *Card:* [{title}]({url})\n"
+                    f"💰 *Current Live Bid:* ${current_price:.2f} USD\n"
                     f"🚢 *All-In Delivered to SG:* ${all_in_cost:.2f} USD\n"
                     f"📈 *Estimated Market Value:* ${estimated_market_value:.2f} USD\n\n"
                     f"🔥 *Net Margin:* Profit cushion of *${margin:.2f} USD* below market value!"
                 )
                 send_telegram_alert(alert_msg)
             else:
-                print("❌ Skipped: Current all-in price is too close to or above market value.")
+                print("❌ Skipped: Price is currently too close to or above market value.")
         else:
-            print("Skipped: Market valuation extraction returned None.")
+            print("Skipped: Historical validation metrics returned None.")
             
-    print("\n--- Live Production Cycle Complete ---")
+    print("\n--- Sniper Execution Cycle Complete ---")
 
 if __name__ == "__main__":
     run_valuation_pipeline()
