@@ -1,6 +1,8 @@
 import os
 import re
 import datetime
+import time
+import json
 import requests
 from google import genai
 from google.genai import types
@@ -32,15 +34,14 @@ def load_watchlist():
         return []
     
     with open(filename, "r") as f:
-        # Pull clean links, ignoring blank lines or comments
         links = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
     print(f"Loaded {len(links)} targeted auctions from watchlist.txt.")
     return links
 
 def appraise_live_url_with_gemini(url):
     """
-    Instructs Gemini to ground itself directly on your live auction link, 
-    bypassing browser blocks to pull current pricing metrics.
+    Instructs Gemini to ground itself directly on your live auction link.
+    JSON formatting is handled via prompt engineering to prevent API tool conflicts.
     """
     print(f"Inspecting live auction asset parameters: {url}")
     prompt = f"""
@@ -49,14 +50,17 @@ def appraise_live_url_with_gemini(url):
     1. The exact descriptive item title of the sports card (including company, player, year, and grading tier like PSA 10 or BGS 9.5).
     2. The current live bid price in USD as a pure decimal number.
     
-    Return your answer strictly as a JSON object with 'title' and 'current_price' keys.
-    Do not include any markdown styling elements or introductory text.
+    Format your response EXACTLY as a raw JSON object with 'title' and 'current_price' keys, like this:
+    {{
+      "title": "Card Name Here",
+      "current_price": 150.00
+    }}
+    Do not include any conversational markdown text, explanation, or notes outside the raw JSON block.
     """
     
     try:
         config = types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-            response_mime_type="application/json"
+            tools=[types.Tool(google_search=types.GoogleSearch())]
         )
         response = ai_client.models.generate_content(
             model='gemini-2.5-flash',
@@ -64,18 +68,24 @@ def appraise_live_url_with_gemini(url):
             config=config
         )
         
-        # Clean out any potential markdown wrapper text
-        raw_text = response.text.strip()
-        clean_json = re.sub(r'^```json\s*|```$', '', raw_text, flags=re.MULTILINE).strip()
+        # Enforce free-tier pacing delay
+        time.sleep(15)
         
-        data = json.loads(clean_json)
+        # Isolate code block content cleanly via regex
+        raw_text = response.text.strip()
+        match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+        if match:
+            raw_text = match.group(0)
+            
+        data = json.loads(raw_text)
         return data.get("title"), float(data.get("current_price", 0))
     except Exception as e:
         print(f"Failed to read live link details via grounding: {e}")
         return None, None
 
 def analyze_market_value_with_grounding(card_title):
-    """Uses Gemini to find historical sold comps on the open web."""
+    """Uses Gemini with live Google Search grounding to find historical sold comps on the open web."""
+    print(f"Researching market value history for: {card_title}")
     prompt = f"""
     Search for recent completed/sold prices on eBay, 130Point, or major auction houses for this exact sports card: "{card_title}".
     Filter out completely irrelevant variations, reprints, or vastly different grading tiers.
@@ -92,6 +102,10 @@ def analyze_market_value_with_grounding(card_title):
             contents=prompt,
             config=config
         )
+        
+        # Enforce free-tier pacing delay
+        time.sleep(15)
+        
         clean_num = re.sub(r'[^\d.]', '', response.text.strip())
         return float(clean_num) if clean_num else None
     except Exception as e:
@@ -101,24 +115,26 @@ def analyze_market_value_with_grounding(card_title):
 def send_telegram_alert(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    requests.post(url, json=payload, timeout=10)
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Telegram notification dispatch error: {e}")
 
 def run_valuation_pipeline():
     print(f"--- Starting Sniper Watchlist Run [{datetime.datetime.utcnow()}] ---")
-    import json # Ensure json is accessible within scope
     
     watchlist_urls = load_watchlist()
     
     for url in watchlist_urls:
-        # Phase 1: Read what the card is currently at right now
+        # Phase 1: Read what the card is currently sitting at
         title, current_price = appraise_live_url_with_gemini(url)
         
         if not title or not current_price:
-            print(f"Skipping link due to extraction limits: {url}")
+            print(f"Skipping link due to extraction limits or errors: {url}\n")
             continue
             
         all_in_cost = calculate_all_in(current_price)
-        print(f"Target identified: '{title}'")
+        print(f"Target cataloged: '{title}'")
         print(f"Current Live Bid: ${current_price:.2f} USD | SG All-In Cost: ${all_in_cost:.2f} USD")
         
         # Phase 2: Run historical market valuation
@@ -128,7 +144,7 @@ def run_valuation_pipeline():
             margin = estimated_market_value - all_in_cost
             print(f"True Live Market Value: ${estimated_market_value:.2f} USD | Profit Spread: ${margin:.2f} USD")
             
-            # Financial Margin Filter: Pings you ONLY if it's currently a bargain!
+            # Financial Margin Filter: Alert only if asset clears a profitable threshold
             if all_in_cost < estimated_market_value:
                 print("🔥 Valid bargain identified! Sending notification to Telegram...")
                 alert_msg = (
@@ -144,6 +160,7 @@ def run_valuation_pipeline():
                 print("❌ Skipped: Price is currently too close to or above market value.")
         else:
             print("Skipped: Historical validation metrics returned None.")
+        print("-" * 40)
             
     print("\n--- Sniper Execution Cycle Complete ---")
 
