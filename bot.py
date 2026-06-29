@@ -110,7 +110,7 @@ def run_valuation_pipeline():
             estimated_market_value = analyze_market_value_with_gemini(lot["title"], raw_html_comps)
             
             # Message fires ONLY if Gemini proves current pricing is lower than historical comps
-            if estimated_market_value and all_in_cost < estimated_market_value:
+            if True: # FORCE TEST DISPATCH
                 margin = estimated_market_value - all_in_cost
                 alert_msg = (
                     f"🚨 *BASEBALL VALUE LOT DETECTED (ENDS WITHIN 4 DAYS)*\n\n"
