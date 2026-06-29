@@ -16,7 +16,7 @@ BUYERS_PREMIUM = 0.22
 EST_SHIPPING_SGD = 25.00
 USD_TO_SGD = 1.35
 
-# Initialize Gemini Client
+# Initialize Upgraded Gemini Client
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 def calculate_max_goldin_bid(market_value_usd):
@@ -40,38 +40,38 @@ def load_watchlist():
     with open(filename, "r") as f:
         return [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
 
-def analyze_entire_watchlist_batched(urls):
+def analyze_watchlist_batched(urls):
     """
-    Bundles all items into exactly ONE API call to preserve your 20 daily tokens.
-    Uses Google Search grounding to extract true market valuations web-wide.
+    Bundles all items into exactly ONE API call to preserve your tokens.
+    Uses Google Search grounding via Gemini 3.5 Flash to extract true valuations.
     """
-    print(f"Bundling {len(urls)} assets into a single API batch token request...")
-    
+    print(f"Bundling {len(urls)} items into a single API batch token request...")
     urls_formatted = "\n".join([f"- {url}" for url in urls])
-    prompt = f"""
-    You are an elite sports card market analyst. I have a list of live auction links.
-    For each link, identify the card title from the URL slug string, and use Google Search grounding to discover its current conservative open market value (based on recent sold historical comps on eBay, 130Point, or major auction houses) in USD.
     
-    Auctions to look up:
+    prompt = f"""
+    You are an elite sports card market analyst. I have a list of live auction links on Goldin.co.
+    For each link, identify the card title from the URL string, and use Google Search grounding to discover its current conservative open market value (based on recent sold historical comps on eBay, 130Point, or major auction houses) in USD.
+    
+    Auctions to evaluate:
     {urls_formatted}
     
-    Return your analysis strictly as a raw JSON array of objects. Do not wrap it in conversational markdown text or code block formatting outside the JSON array. Each object must contain exactly these keys:
+    Return your analysis strictly as a raw JSON array of objects. Do not wrap it in markdown block formatting like ```json or add conversational text outside the array. Each object must contain exactly these keys:
     - "url": The exact original URL provided.
     - "card_title": A clean, professionally formatted title of the card.
     - "estimated_market_value_usd": A pure decimal number representing the median recent sold price. If no reliable comps exist, return null.
     """
     
+    config = types.GenerateContentConfig(
+        tools=[types.Tool(google_search=types.GoogleSearch())]
+    )
+    
     try:
-        config = types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())]
-        )
         response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.5-flash',
             contents=prompt,
             config=config
         )
         
-        # Clean response and isolate JSON array boundaries
         raw_text = response.text.strip()
         match = re.search(r'\[.*\]', raw_text, re.DOTALL)
         if match:
@@ -79,18 +79,18 @@ def analyze_entire_watchlist_batched(urls):
             
         return json.loads(raw_text)
     except Exception as e:
-        print(f"❌ Batch valuation execution failed: {e}")
+        print(f"❌ Gemini 3.5 execution failed: {e}")
         return []
 
 def send_telegram_digest(items_report):
     """Compiles appraisal data into a clean, scannable investment summary message."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    
     message_lines = [
-        f"📋 *LIVE WATCHLIST MARKET APPRAISAL*",
+        "📋 *LIVE WATCHLIST MARKET APPRAISAL*",
         f"🕒 _Generated: {timestamp} SGT_\n",
-        "Below is your calculated sniper blueprint. The *Max Goldin Bid* reflects your absolute walk-away ceiling to guarantee you stay below open market value after SG shipping and fees:\n"
+        "Here is your customized sniper blueprint. The *Max Goldin Bid* calculates your absolute walk-away ceiling to lock in profits after factoring in your Singapore import shipping fees and buyers premium:\n"
     ]
     
     for item in items_report:
@@ -121,28 +121,28 @@ def send_telegram_digest(items_report):
     try:
         res = requests.post(url, json=payload, timeout=10)
         if res.status_code == 200:
-            print("🚀 Unified valuation summary successfully pushed to Telegram channel!")
+            print("🚀 Blueprint summary successfully pushed to Telegram!")
         else:
-            print(f"⚠️ Telegram returned status code error: {res.status_code}")
+            print(f"⚠️ Telegram status code error: {res.status_code}")
     except Exception as e:
-        print(f"Telegram notification dispatch error: {e}")
+        print(f"Telegram dispatch error: {e}")
 
-def run_valuation_pipeline():
-    print(f"--- Starting Batch Sniper Appraisal Run [{datetime.datetime.utcnow()}] ---")
+def run_pipeline():
+    print(f"--- Starting Watchlist Sniper Engine [{datetime.datetime.now()}] ---")
     watchlist_urls = load_watchlist()
     
     if not watchlist_urls:
         print("Watchlist empty or file missing. Exiting execution cycle.")
         return
         
-    analysis_results = analyze_entire_watchlist_batched(watchlist_urls)
+    analysis_results = analyze_watchlist_batched(watchlist_urls)
     
     if analysis_results:
         send_telegram_digest(analysis_results)
     else:
-        print("Pipeline aborted: No data returned from batch search cluster.")
+        print("Pipeline aborted: Engine returned empty dataset cluster.")
         
     print("--- Sniper Execution Cycle Complete ---")
 
 if __name__ == "__main__":
-    run_valuation_pipeline()
+    run_pipeline()
