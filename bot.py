@@ -1,7 +1,6 @@
 import os
 import re
 import datetime
-import time
 import json
 import requests
 from google import genai
@@ -20,56 +19,46 @@ USD_TO_SGD = 1.35
 # Initialize Gemini Client
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
-def calculate_all_in(current_bid):
-    """Calculates final price delivered to SG including 22% BP and shipping conversion."""
-    if not current_bid:
+def calculate_max_goldin_bid(market_value_usd):
+    """
+    Reverse-engineers your SG shipping formula to determine the exact 
+    maximum hammer price you can bid on Goldin before losing money.
+    """
+    if not market_value_usd or market_value_usd <= 0:
         return 0.0
-    bp_cost = current_bid * (1 + BUYERS_PREMIUM)
-    shipping_usd = EST_SHIPPING_SGD / USD_TO_SGD
-    return round(bp_cost + shipping_usd, 2)
+    market_value_sgd = market_value_usd * USD_TO_SGD
+    max_allowable_usd_with_bp = (market_value_sgd - EST_SHIPPING_SGD) / USD_TO_SGD
+    max_hammer_bid = max_allowable_usd_with_bp / (1 + BUYERS_PREMIUM)
+    return round(max_hammer_bid, 2)
 
 def load_watchlist():
-    """Reads live targets directly from your repository text file."""
+    """Reads target links directly from your repository text file."""
     filename = "watchlist.txt"
     if not os.path.exists(filename):
         print(f"⚠️ '{filename}' not found. Please create it in your repo root.")
         return []
-    
     with open(filename, "r") as f:
-        links = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
-    print(f"Loaded {len(links)} targeted auctions from watchlist.txt.")
-    return links
+        return [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
 
-def extract_card_title_from_url(url):
+def analyze_entire_watchlist_batched(urls):
     """
-    Saves API tokens by reading details directly from the URL link slug.
-    Converts text strings cleanly to title format while stripping tracking hashes.
+    Bundles all items into exactly ONE API call to preserve your 20 daily tokens.
+    Uses Google Search grounding to extract true market valuations web-wide.
     """
-    try:
-        slug = url.split("/item/")[-1]
-        parts = slug.split("-")
-        if len(parts) > 1:
-            # Strip unique tracking hash strings at the tail end of the link
-            parts = parts[:-1]
-        return " ".join(parts).title()
-    except Exception:
-        return "Unknown Sports Card Target"
-
-def appraise_live_bid_with_gemini(url):
-    """
-    Instructs Gemini to ground itself on live auction links to locate the current price.
-    Returns defensive null fallbacks to prevent conversion errors.
-    """
-    print(f"Inspecting live auction asset parameters: {url}")
+    print(f"Bundling {len(urls)} assets into a single API batch token request...")
+    
+    urls_formatted = "\n".join([f"- {url}" for url in urls])
     prompt = f"""
-    Look closely at this live auction link: "{url}".
-    Extract the current live bid price in USD as a pure decimal number.
-    Format your response EXACTLY as a raw JSON object with a single 'current_price' key:
-    {{
-      "current_price": 150.00
-    }}
-    If you cannot look inside or find the bid element on the page, return null for the value.
-    Do not include any conversational markdown text outside the raw JSON block.
+    You are an elite sports card market analyst. I have a list of live auction links.
+    For each link, identify the card title from the URL slug string, and use Google Search grounding to discover its current conservative open market value (based on recent sold historical comps on eBay, 130Point, or major auction houses) in USD.
+    
+    Auctions to look up:
+    {urls_formatted}
+    
+    Return your analysis strictly as a raw JSON array of objects. Do not wrap it in conversational markdown text or code block formatting outside the JSON array. Each object must contain exactly these keys:
+    - "url": The exact original URL provided.
+    - "card_title": A clean, professionally formatted title of the card.
+    - "estimated_market_value_usd": A pure decimal number representing the median recent sold price. If no reliable comps exist, return null.
     """
     
     try:
@@ -82,121 +71,78 @@ def appraise_live_bid_with_gemini(url):
             config=config
         )
         
-        # Enforce free-tier pacing delay
-        time.sleep(15)
-        
+        # Clean response and isolate JSON array boundaries
         raw_text = response.text.strip()
-        match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+        match = re.search(r'\[.*\]', raw_text, re.DOTALL)
         if match:
             raw_text = match.group(0)
             
-        data = json.loads(raw_text)
-        price_raw = data.get("current_price")
-        
-        # Defensive Type-Checking: Prevent NoneType conversion failure
-        return float(price_raw) if price_raw is not None else 0.0
+        return json.loads(raw_text)
     except Exception as e:
-        print(f"⚠️ Live price extraction fallback engaged: {e}")
-        return 0.0
+        print(f"❌ Batch valuation execution failed: {e}")
+        return []
 
-def analyze_market_value_with_grounding(card_title):
-    """Uses Gemini live Google Search grounding to find historical sold comps on the open web."""
-    print(f"Researching market value history for: {card_title}")
-    prompt = f"""
-    Search for recent completed/sold prices on eBay, 130Point, or major auction houses for this exact sports card: "{card_title}".
-    Filter out completely irrelevant variations, reprints, or vastly different grading tiers.
-    Calculate a fair, realistic conservative median market value in USD for this item.
-    Respond with ONLY a raw numeric value (e.g., 245.50). Do not include any dollar signs, letters, or explanation.
-    """
-    
-    try:
-        config = types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())]
-        )
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=config
-        )
-        
-        # Enforce free-tier pacing delay
-        time.sleep(15)
-        
-        clean_num = re.sub(r'[^\d.]', '', response.text.strip())
-        return float(clean_num) if clean_num else None
-    except Exception as e:
-        print(f"⚠️ Gemini Comps API calculation failure for {card_title}: {e}")
-        return None
-
-def send_telegram_alert(message):
+def send_telegram_digest(items_report):
+    """Compiles appraisal data into a clean, scannable investment summary message."""
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    message_lines = [
+        f"📋 *LIVE WATCHLIST MARKET APPRAISAL*",
+        f"🕒 _Generated: {timestamp} SGT_\n",
+        "Below is your calculated sniper blueprint. The *Max Goldin Bid* reflects your absolute walk-away ceiling to guarantee you stay below open market value after SG shipping and fees:\n"
+    ]
+    
+    for item in items_report:
+        title = item.get("card_title", "Unknown Sports Card Target")
+        link = item.get("url", "#")
+        mv = item.get("estimated_market_value_usd")
+        
+        if mv:
+            max_bid = calculate_max_goldin_bid(mv)
+            message_lines.append(f"⚾ *{title}*")
+            message_lines.append(f"📈 *Est. Market Value:* ${mv:,.2f} USD")
+            message_lines.append(f"🛑 *Your Max Goldin Bid:* `${max_bid:,.2f} USD`")
+            message_lines.append(f"🔗 [View Auction]({link})")
+            message_lines.append("-" * 28)
+        else:
+            message_lines.append(f"⚠️ *{title}*")
+            message_lines.append(f"ℹ️ _No definitive open-market historical pricing located via search context._")
+            message_lines.append(f"🔗 [View Auction]({link})")
+            message_lines.append("-" * 28)
+            
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": "\n".join(message_lines),
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True
+    }
+    
     try:
         res = requests.post(url, json=payload, timeout=10)
         if res.status_code == 200:
-            print("🚀 Notification successfully pushed to Telegram channel!")
+            print("🚀 Unified valuation summary successfully pushed to Telegram channel!")
         else:
-            print(f"⚠️ Telegram returned status code: {res.status_code}")
+            print(f"⚠️ Telegram returned status code error: {res.status_code}")
     except Exception as e:
         print(f"Telegram notification dispatch error: {e}")
 
 def run_valuation_pipeline():
-    print(f"--- Starting Sniper Watchlist Run [{datetime.datetime.utcnow()}] ---")
-    
+    print(f"--- Starting Batch Sniper Appraisal Run [{datetime.datetime.utcnow()}] ---")
     watchlist_urls = load_watchlist()
     
-    for url in watchlist_urls:
-        # Step 1: Use native local string parsing for titles to preserve daily quota limit
-        title = extract_card_title_from_url(url)
-        print(f"\nTarget Cataloged: '{title}'")
+    if not watchlist_urls:
+        print("Watchlist empty or file missing. Exiting execution cycle.")
+        return
         
-        # Step 2: Request real-time asset pricing metrics defensively
-        current_price = appraise_live_bid_with_gemini(url)
-        all_in_cost = calculate_all_in(current_price)
+    analysis_results = analyze_entire_watchlist_batched(watchlist_urls)
+    
+    if analysis_results:
+        send_telegram_digest(analysis_results)
+    else:
+        print("Pipeline aborted: No data returned from batch search cluster.")
         
-        if current_price > 0:
-            print(f"Current Live Bid: ${current_price:.2f} USD | SG All-In Cost: ${all_in_cost:.2f} USD")
-        else:
-            print("⚠️ Live bid price missing/unindexed. Running valuation checks using pure baseline comps...")
-            
-        # Step 3: Run historical open-market valuation checks
-        estimated_market_value = analyze_market_value_with_grounding(title)
-        
-        if estimated_market_value is not None:
-            print(f"True Live Market Value: ${estimated_market_value:.2f} USD")
-            
-            # If current price is missing, alert the market value directly so you can sniper bid manually
-            if current_price == 0.0:
-                print("🔥 Base comp located. Pushing data report to Telegram...")
-                alert_msg = (
-                    f"📊 *WATCHLIST REPORT: VALUE APPRAISAL*\n\n"
-                    f"⚾ *Card:* [{title}]({url})\n"
-                    f"📈 *Estimated Open Market Value:* ${estimated_market_value:.2f} USD\n"
-                    f"ℹ️ _Note: Live price could not be auto-extracted. Check item page link manually to verify target bargain window!_"
-                )
-                send_telegram_alert(alert_msg)
-            else:
-                margin = estimated_market_value - all_in_cost
-                print(f"Calculated Profit Spread: ${margin:.2f} USD")
-                
-                if all_in_cost < estimated_market_value:
-                    print("🔥 Valid bargain identified! Sending notification to Telegram...")
-                    alert_msg = (
-                        f"🎯 *WATCHLIST SNIPER: BARGAIN DETECTED*\n\n"
-                        f"⚾ *Card:* [{title}]({url})\n"
-                        f"💰 *Current Live Bid:* ${current_price:.2f} USD\n"
-                        f"🚢 *All-In Delivered to SG:* ${all_in_cost:.2f} USD\n"
-                        f"📈 *Estimated Market Value:* ${estimated_market_value:.2f} USD\n\n"
-                        f"🔥 *Net Margin:* Profit cushion of *NOTE: ${margin:.2f} USD* below market value!"
-                    )
-                    send_telegram_alert(alert_msg)
-                else:
-                    print("❌ Skipped: Price is currently too close to or above market value.")
-        else:
-            print("Skipped: Historical validation metrics returned None due to rate limit constraints.")
-        print("-" * 40)
-            
-    print("\n--- Sniper Execution Cycle Complete ---")
+    print("--- Sniper Execution Cycle Complete ---")
 
 if __name__ == "__main__":
     run_valuation_pipeline()
